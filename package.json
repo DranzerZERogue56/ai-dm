@@ -1,0 +1,11 @@
+{
+  "name": "ai-dm",
+  "private": true,
+  "version": "0.0.1",
+  "workspaces": ["frontend", "worker", "ai-dm-agent", "shared"],
+  "scripts": {
+    "dev:frontend": "npm --workspace frontend run dev",
+    "dev:worker": "npm --workspace worker run dev",
+    "dev:agent": "npm --workspace ai-dm-agent run dev"
+  }
+}

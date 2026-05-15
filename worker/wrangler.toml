@@ -1,0 +1,20 @@
+name = "ai-dm-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "CAMPAIGN_ROOM"
+class_name = "CampaignRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["CampaignRoom"]
+
+# Configure once you have a Neon/Supabase Postgres URL:
+# [[hyperdrive]]
+# binding = "HYPERDRIVE"
+# id = "<your-hyperdrive-id>"
+
+[vars]
+AGENT_SHARED_SECRET = "change-me-in-dev-vars"

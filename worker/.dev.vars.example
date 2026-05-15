@@ -1,0 +1,6 @@
+# Copy to worker/.dev.vars and fill in. wrangler dev picks this up automatically.
+# Local Postgres example:
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/aidm
+# Neon example:
+# DATABASE_URL=postgres://user:pass@ep-xxxx.us-east-2.aws.neon.tech/aidm?sslmode=require
+AGENT_SHARED_SECRET=change-me
