@@ -5,6 +5,7 @@ import { runHelperTurn } from "./player-helper";
 import { runAuditTurn } from "./audit-agent";
 import { scheduleMdWrite, mdPathFor } from "./md-mirror";
 import { scheduleVaultWrite, vaultRootFor } from "./obsidian-vault";
+import { scanVault } from "./vault-ingest";
 
 const OBSIDIAN_VAULT = process.env.OBSIDIAN_VAULT;
 function syncMirrors() {
@@ -92,12 +93,42 @@ async function handleMessage(raw: Buffer) {
         id: m.id, author: m.authorName, text: m.text, channel: m.channel, role: m.authorRole, createdAt: m.createdAt,
       }));
       state.recentChat = state.fullChat.slice(-40);
-      syncMirrors();
+      // Don't auto-sync the vault on snapshot — that would clobber user edits
+      // between codex changes. The vault is updated when the codex actually
+      // changes (codex.upsert / codex.delete) or via the one-shot exporter.
+      scheduleMdWrite(CAMPAIGN_ID!, state.codex);
       break;
     case "ai.paused":
       state.aiPaused = msg.paused;
       console.log(`[agent] ai ${state.aiPaused ? "paused" : "resumed"}`);
       break;
+    case "vault.scan": {
+      if (!OBSIDIAN_VAULT) {
+        send({ type: "vault.diff", requestId: msg.requestId, changes: [], scannedFiles: 0, error: "OBSIDIAN_VAULT not set on the agent" });
+        break;
+      }
+      try {
+        const r = await scanVault(OBSIDIAN_VAULT, CAMPAIGN_ID!, state.codex);
+        console.log(`[agent] vault.scan: ${r.scannedFiles} files, ${r.changes.length} changes`);
+        send({ type: "vault.diff", requestId: msg.requestId, changes: r.changes as any, scannedFiles: r.scannedFiles });
+      } catch (e) {
+        send({ type: "vault.diff", requestId: msg.requestId, changes: [], scannedFiles: 0, error: (e as Error).message });
+      }
+      break;
+    }
+    case "vault.apply": {
+      const valid = (msg.changes ?? []).filter((c) => c && c.next && (c.next as any).id);
+      for (const c of valid) {
+        // Update local state immediately so any chat-driven AI turn that arrives
+        // milliseconds later already sees the vault-sourced codex.
+        const i = state.codex.findIndex((e) => e.id === (c.next as any).id);
+        if (i >= 0) state.codex[i] = { ...state.codex[i], ...(c.next as any) };
+        else state.codex.push(c.next as any);
+        send({ type: "codex.upsert", entry: c.next as any });
+      }
+      console.log(`[agent] vault.apply: ${valid.length} entries upserted${valid.length !== (msg.changes?.length ?? 0) ? ` (${(msg.changes?.length ?? 0) - valid.length} skipped)` : ""}`);
+      break;
+    }
     case "codex.upsert": {
       const i = state.codex.findIndex((e) => e.id === msg.entry.id);
       if (i >= 0) state.codex[i] = msg.entry; else state.codex.push(msg.entry);

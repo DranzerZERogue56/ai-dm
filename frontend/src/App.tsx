@@ -7,6 +7,8 @@ import { Lobby } from "./components/Lobby";
 import { CodexTicker } from "./components/CodexTicker";
 import { CodexPage } from "./components/CodexPage";
 import { InviteManager } from "./components/InviteManager";
+import { VaultDiffModal } from "./components/VaultDiffModal";
+import type { VaultChange } from "@ai-dm/shared";
 import { beep, getSoundEnabled, setSoundEnabled } from "./lib/beep";
 import { computeChange, type CodexChangeMap } from "./lib/codex-changes";
 
@@ -60,6 +62,17 @@ export function App() {
   const [view, setView] = useState<"room" | "codex">(() => (new URLSearchParams(window.location.search).get("v") === "codex" ? "codex" : "room"));
   const [aiPaused, setAiPaused] = useState(false);
   const [invitesOpen, setInvitesOpen] = useState(false);
+  const [vaultGateOn, setVaultGateOn] = useState<boolean>(() => localStorage.getItem("ai-dm.vaultGate") === "1");
+  useEffect(() => { localStorage.setItem("ai-dm.vaultGate", vaultGateOn ? "1" : "0"); }, [vaultGateOn]);
+  // When a gate-intercepted send is in flight: hold the pending chat + scan id + phase.
+  const [vaultGateState, setVaultGateState] = useState<{
+    phase: "scanning" | "diff" | "applying" | "error";
+    requestId: string;
+    pendingChat: { text: string; opts?: { invokeAi?: boolean; speakAsNpcId?: string } };
+    changes?: VaultChange[];
+    scannedFiles?: number;
+    error?: string;
+  } | null>(null);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (view === "codex") url.searchParams.set("v", "codex"); else url.searchParams.delete("v");
@@ -72,6 +85,43 @@ export function App() {
   function markKindSeen(kind: CodexKind) {
     setLastSeenByKind((m) => ({ ...m, [kind]: Date.now() }));
   }
+
+  // Fire the pending chat (post-gate) on the WS.
+  function fireChat(text: string, opts?: { invokeAi?: boolean; speakAsNpcId?: string }) {
+    sock?.send({ type: "chat", channel: "dm", text, invokeAi: opts?.invokeAi, speakAsNpcId: opts?.speakAsNpcId });
+  }
+  // The new chat-send wrapper used by DMChat. Intercepts AI-bound sends when the gate is on.
+  function gatedChatSend(text: string, opts?: { invokeAi?: boolean; speakAsNpcId?: string }) {
+    const aiBound = !!opts?.invokeAi || /^\s*@dm(?:\b|\s)/i.test(text);
+    if (!vaultGateOn || !aiBound) { fireChat(text, opts); return; }
+    const requestId = `vs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setVaultGateState({ phase: "scanning", requestId, pendingChat: { text, opts } });
+    sock?.send({ type: "vault.scan", requestId });
+  }
+  // Auto-fire when the diff comes back empty.
+  useEffect(() => {
+    if (!vaultGateState) return;
+    if (vaultGateState.phase === "diff" && vaultGateState.changes && vaultGateState.changes.length === 0) {
+      fireChat(vaultGateState.pendingChat.text, vaultGateState.pendingChat.opts);
+      setVaultGateState(null);
+    }
+  }, [vaultGateState]);
+  function gateApply(accepted: VaultChange[]) {
+    if (!vaultGateState) return;
+    setVaultGateState({ ...vaultGateState, phase: "applying" });
+    sock?.send({ type: "vault.apply", requestId: vaultGateState.requestId, changes: accepted });
+    // Fire the chat shortly after; the agent applies + updates local state synchronously.
+    setTimeout(() => {
+      fireChat(vaultGateState.pendingChat.text, vaultGateState.pendingChat.opts);
+      setVaultGateState(null);
+    }, 250);
+  }
+  function gateSkip() {
+    if (!vaultGateState) return;
+    fireChat(vaultGateState.pendingChat.text, vaultGateState.pendingChat.opts);
+    setVaultGateState(null);
+  }
+  function gateCancel() { setVaultGateState(null); }
   function toggleSound() {
     setSoundOnState((on) => {
       const next = !on;
@@ -124,6 +174,13 @@ export function App() {
           break;
         case "ai.paused":
           setAiPaused(msg.paused);
+          break;
+        case "vault.diff":
+          setVaultGateState((cur) => {
+            if (!cur || cur.requestId !== msg.requestId) return cur;
+            if (msg.error) return { ...cur, phase: "error", error: msg.error };
+            return { ...cur, phase: "diff", changes: msg.changes, scannedFiles: msg.scannedFiles };
+          });
           break;
         case "mode.set": setMode(msg.mode); break;
         case "dm.status":
@@ -191,6 +248,16 @@ export function App() {
         >
           AI {aiPaused ? "paused" : "ready"}
         </button>
+        <button
+          className="btn"
+          style={vaultGateOn ? { color: "var(--bg)", background: "var(--amber)", borderColor: "var(--amber)" } : {}}
+          onClick={() => setVaultGateOn((v) => !v)}
+          title={vaultGateOn
+            ? "Vault gate is ON. AI-bound messages will pause for a vault scan before firing."
+            : "Vault gate is OFF. AI prompts fire immediately. Turn on when you edit in Obsidian."}
+        >
+          📓 vault {vaultGateOn ? "on" : "off"}
+        </button>
         {mode === "play" && (
           <button
             className="btn"
@@ -220,11 +287,24 @@ export function App() {
     />
   ) : null;
 
+  const vaultOverlay = vaultGateState ? (
+    <VaultDiffModal
+      phase={vaultGateState.phase}
+      changes={vaultGateState.changes ?? []}
+      scannedFiles={vaultGateState.scannedFiles}
+      error={vaultGateState.error}
+      onApply={gateApply}
+      onSkip={gateSkip}
+      onCancel={gateCancel}
+    />
+  ) : null;
+
   if (view === "codex") {
     return (
       <div className={appClass}>
         {header}
         {inviteOverlay}
+        {vaultOverlay}
         <div className="panel codex-page-wrap">
           <CodexPage
             entries={codex}
@@ -266,7 +346,7 @@ export function App() {
         <div className="panel-body">
           <DMChat
             messages={chat.filter((m) => m.channel === "dm")}
-            onSend={(text, opts) => sock?.send({ type: "chat", channel: "dm", text, invokeAi: opts?.invokeAi, speakAsNpcId: opts?.speakAsNpcId })}
+            onSend={(text, opts) => gatedChatSend(text, opts)}
             dmStatus={dmStatus}
             dmPartial={dmPartial}
             buildLog={buildLog}

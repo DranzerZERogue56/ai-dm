@@ -143,6 +143,16 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export interface VaultChange {
+  entryId: string;
+  kind: string;
+  title: string;
+  fields: ("body" | "sections" | "tags" | "visibility" | "title")[];
+  diffSummary: string;
+  // The full entry the client should upsert if the DM accepts the change.
+  next: Partial<CodexEntry> & { kind: CodexKind; title: string; body: string };
+}
+
 export interface RollRequest {
   id: string;
   fromId: string;            // who is asking
@@ -181,6 +191,9 @@ export type ClientToServer =
   | { type: "roll"; notation: string; label?: string; rollRequestId?: string }
   | { type: "roll.request"; targetId: string; label: string; dice: string; dc?: number; whisper?: boolean }
   | { type: "ai.pause"; paused: boolean }
+  | { type: "vault.scan"; requestId: string }
+  | { type: "vault.diff"; requestId: string; changes: VaultChange[]; scannedFiles: number; error?: string }
+  | { type: "vault.apply"; requestId: string; changes: VaultChange[] }
   | { type: "codex.upsert"; entry: Partial<CodexEntry> & { kind: CodexKind; title: string; body: string } }
   | { type: "codex.delete"; id: string }
   | { type: "combat.update"; state: CombatState }
@@ -204,6 +217,9 @@ export type ServerToClient =
   | { type: "codex.hide"; id: string }
   | { type: "ai.paused"; paused: boolean }
   | { type: "roll.request"; request: RollRequest }
+  | { type: "vault.scan"; requestId: string }
+  | { type: "vault.diff"; requestId: string; changes: VaultChange[]; scannedFiles: number; error?: string }
+  | { type: "vault.apply"; requestId: string; changes: VaultChange[] }
   | { type: "combat.update"; state: CombatState }
   | { type: "mode.set"; mode: CampaignMode }
   | { type: "participants"; participants: Participant[] }

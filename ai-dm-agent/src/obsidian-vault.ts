@@ -3,7 +3,12 @@
 // READ-ONLY mirror — anything in <vault>/AI-DM/<campaignId>/ may be overwritten.
 import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import type { CodexEntry, CodexKind } from "@ai-dm/shared";
+
+export function sha256(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
 
 const KIND_DIR: Record<CodexKind, string> = {
   npc: "Npcs",
@@ -147,18 +152,30 @@ function renderIndex(codex: CodexEntry[], campaignId: string, campaignName?: str
   return lines.join("\n");
 }
 
-// Manifest helps us identify which files we wrote last time so a renamed
-// entry (changed title) doesn't leave a stale file behind.
-interface Manifest { files: string[]; updated: string; }
+// Manifest tracks every file we wrote and its content hash. The hash lets the
+// vault scanner detect "user edited this file after we wrote it" without
+// false positives from filesystem mtime noise.
+export interface ManifestFile {
+  // relative path within <vault>/AI-DM/<campaignId>/
+  path: string;
+  // entry id (from the rendered frontmatter); null for _Index.md
+  entryId: string | null;
+  // SHA256 of the file content we wrote
+  hash: string;
+}
+export interface Manifest {
+  files: ManifestFile[];
+  updated: string;
+}
 
-function campaignDir(vault: string, campaignId: string): string {
+export function campaignDir(vault: string, campaignId: string): string {
   return join(vault, "AI-DM", campaignId);
 }
 function manifestPath(vault: string, campaignId: string): string {
   return join(campaignDir(vault, campaignId), ".ai-dm-manifest.json");
 }
 
-async function readManifest(vault: string, campaignId: string): Promise<Manifest | null> {
+export async function readManifest(vault: string, campaignId: string): Promise<Manifest | null> {
   try {
     const raw = await readFile(manifestPath(vault, campaignId), "utf8");
     return JSON.parse(raw) as Manifest;
@@ -169,36 +186,82 @@ export async function writeVault(vault: string, campaignId: string, codex: Codex
   const root = campaignDir(vault, campaignId);
   await mkdir(root, { recursive: true });
 
-  const titleById = new Map(codex.map((e) => [e.id, e.title]));
-  const writtenFiles: string[] = [];
+  const prev = await readManifest(vault, campaignId);
+  // Look up: relPath → previously-written hash (what we last knew the file as)
+  const prevHashByPath = new Map<string, string>();
+  if (prev) for (const f of prev.files) prevHashByPath.set(f.path, f.hash);
 
-  // Determine final paths and write each entry.
+  const titleById = new Map(codex.map((e) => [e.id, e.title]));
+  const writtenFiles: ManifestFile[] = [];
+  let skippedDueToUserEdits = 0;
+
   for (const e of codex) {
     const kindDir = KIND_DIR[e.kind] ?? humanKind(e.kind);
     const relPath = join(kindDir, `${safeFilename(e.title)}.md`);
     const fp = join(root, relPath);
     await mkdir(dirname(fp), { recursive: true });
-    await writeFile(fp, renderEntry(e, titleById), "utf8");
-    writtenFiles.push(relPath);
+    const newContent = renderEntry(e, titleById);
+    const newHash = sha256(newContent);
+
+    // If this file exists and the user has edited it since we last wrote it,
+    // don't overwrite — preserve the user's vault edits until the gate ingests them.
+    let onDiskHash: string | null = null;
+    try { onDiskHash = sha256(await readFile(fp, "utf8")); } catch { onDiskHash = null; }
+    const lastKnownHash = prevHashByPath.get(relPath);
+    const userEdited = !!(onDiskHash && lastKnownHash && onDiskHash !== lastKnownHash);
+
+    if (userEdited) {
+      // Edge case: empty file on disk almost certainly = a bad cleanup, not a
+      // genuine "the user emptied this note." Treat as our content (write fresh).
+      const onDiskContent = onDiskHash ? await readFile(fp, "utf8").catch(() => "") : "";
+      if (onDiskContent.trim().length === 0) {
+        await writeFile(fp, newContent, "utf8");
+        writtenFiles.push({ path: relPath, entryId: e.id, hash: newHash });
+        continue;
+      }
+      // Keep the user's content on disk; KEEP the last-known hash in the manifest
+      // so the vault scanner can still detect this file as diverged (hash on
+      // disk ≠ manifest hash) until the user ingests via the gate.
+      writtenFiles.push({ path: relPath, entryId: e.id, hash: lastKnownHash! });
+      skippedDueToUserEdits++;
+      continue;
+    }
+    // Only write if content actually changed (avoids gratuitous mtime churn).
+    if (onDiskHash === newHash) {
+      writtenFiles.push({ path: relPath, entryId: e.id, hash: newHash });
+      continue;
+    }
+    await writeFile(fp, newContent, "utf8");
+    writtenFiles.push({ path: relPath, entryId: e.id, hash: newHash });
   }
 
-  // Index page
-  await writeFile(join(root, "_Index.md"), renderIndex(codex, campaignId, campaignName), "utf8");
-  writtenFiles.push("_Index.md");
+  // Index page is always ours — overwrite freely.
+  const indexContent = renderIndex(codex, campaignId, campaignName);
+  await writeFile(join(root, "_Index.md"), indexContent, "utf8");
+  writtenFiles.push({ path: "_Index.md", entryId: null, hash: sha256(indexContent) });
 
-  // Sweep: delete files that existed last sync but aren't in the new set.
-  const prev = await readManifest(vault, campaignId);
+  // Sweep: delete files that existed last sync but aren't in the new set
+  // AND were not user-edited (manifest hash still matches on-disk).
   if (prev) {
-    const now = new Set(writtenFiles);
+    const nowPaths = new Set(writtenFiles.map((f) => f.path));
     for (const f of prev.files) {
-      if (!now.has(f)) {
-        try { await rm(join(root, f), { force: true }); } catch {}
+      if (nowPaths.has(f.path)) continue;
+      const fp = join(root, f.path);
+      let onDiskHash: string | null = null;
+      try { onDiskHash = sha256(await readFile(fp, "utf8")); } catch { continue; }
+      if (onDiskHash === f.hash) {
+        // Untouched by user → safe to delete (the entry was deleted/renamed).
+        try { await rm(fp, { force: true }); } catch {}
       }
+      // Else: user edited a since-deleted-from-codex file. Leave it alone.
     }
   }
 
   const manifest: Manifest = { files: writtenFiles, updated: new Date().toISOString() };
   await writeFile(manifestPath(vault, campaignId), JSON.stringify(manifest, null, 2), "utf8");
+  if (skippedDueToUserEdits > 0) {
+    console.log(`[obsidian-vault] preserved ${skippedDueToUserEdits} user-edited file(s); use the vault gate to ingest them`);
+  }
 }
 
 // Coalesce rapid bursts.

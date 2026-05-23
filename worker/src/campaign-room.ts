@@ -469,6 +469,27 @@ export class CampaignRoom {
         if (session.participant.role !== "agent") return;
         this.broadcast({ type: "dm.partial", partial: msg.partial });
         return;
+      case "vault.scan":
+        if (session.participant.role !== "dm") return;
+        // Route to agent(s) only
+        this.broadcastPerSession((s) =>
+          s.participant.role === "agent" ? { type: "vault.scan", requestId: msg.requestId } : null
+        );
+        return;
+      case "vault.diff":
+        if (session.participant.role !== "agent") return;
+        // Route to DM(s) only
+        this.broadcastPerSession((s) =>
+          s.participant.role === "dm" ? { type: "vault.diff", requestId: msg.requestId, changes: msg.changes, scannedFiles: msg.scannedFiles, error: msg.error } : null
+        );
+        return;
+      case "vault.apply":
+        if (session.participant.role !== "dm") return;
+        // Route to agent(s) only — agent will then emit codex.upsert per change
+        this.broadcastPerSession((s) =>
+          s.participant.role === "agent" ? { type: "vault.apply", requestId: msg.requestId, changes: msg.changes } : null
+        );
+        return;
     }
   }
 
