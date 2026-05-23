@@ -6,6 +6,7 @@ import { DMChat } from "./components/DMChat";
 import { Lobby } from "./components/Lobby";
 import { CodexTicker } from "./components/CodexTicker";
 import { CodexPage } from "./components/CodexPage";
+import { InviteManager } from "./components/InviteManager";
 import { beep, getSoundEnabled, setSoundEnabled } from "./lib/beep";
 import { computeChange, type CodexChangeMap } from "./lib/codex-changes";
 
@@ -58,6 +59,7 @@ export function App() {
   const [soundOn, setSoundOnState] = useState<boolean>(() => getSoundEnabled());
   const [view, setView] = useState<"room" | "codex">(() => (new URLSearchParams(window.location.search).get("v") === "codex" ? "codex" : "room"));
   const [aiPaused, setAiPaused] = useState(false);
+  const [invitesOpen, setInvitesOpen] = useState(false);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (view === "codex") url.searchParams.set("v", "codex"); else url.searchParams.delete("v");
@@ -178,6 +180,9 @@ export function App() {
       <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}>
         <PersistenceBadge info={persistence} />
         <button className="btn" onClick={toggleSound} title="toggle sound">{soundOn ? "♪ on" : "♪ off"}</button>
+        {role === "dm" && token && (
+          <button className="btn" onClick={() => setInvitesOpen(true)} title="manage co-DM invites">co-DMs</button>
+        )}
         <button
           className="btn"
           style={aiPaused ? { color: "var(--danger)", borderColor: "var(--danger)" } : {}}
@@ -205,10 +210,21 @@ export function App() {
     </div>
   );
 
+  const inviteOverlay = role === "dm" && token ? (
+    <InviteManager
+      campaignId={campaignId}
+      dmToken={token}
+      participants={participants}
+      open={invitesOpen}
+      onClose={() => setInvitesOpen(false)}
+    />
+  ) : null;
+
   if (view === "codex") {
     return (
       <div className={appClass}>
         {header}
+        {inviteOverlay}
         <div className="panel codex-page-wrap">
           <CodexPage
             entries={codex}
@@ -229,6 +245,7 @@ export function App() {
   return (
     <div className={appClass}>
       {header}
+      {inviteOverlay}
 
       <div className="panel codex">
         <div className="panel-header">codex</div>
