@@ -55,6 +55,7 @@ AUDIT_MODEL=claude-sonnet-4-6
 - **DO storage** (always-on) — `.wrangler/state/` in dev, automatic in prod
 - **Postgres** (optional in dev, required in prod) — write-through for codex, chat, invites
 - **`.md` mirror** — agent writes `~/.ai-dm/campaigns/<id>.md` on every codex change so you have a human-readable archive
+- **Obsidian vault mirror** — set `OBSIDIAN_VAULT=<path>` and the agent also writes one `.md` per entry into a real vault with frontmatter + `[[wikilinks]]`. See [OBSIDIAN.md](./OBSIDIAN.md).
 
 ## Persistence schema
 

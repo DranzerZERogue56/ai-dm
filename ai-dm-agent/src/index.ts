@@ -4,6 +4,13 @@ import { runDmTurn } from "./dm-agent";
 import { runHelperTurn } from "./player-helper";
 import { runAuditTurn } from "./audit-agent";
 import { scheduleMdWrite, mdPathFor } from "./md-mirror";
+import { scheduleVaultWrite, vaultRootFor } from "./obsidian-vault";
+
+const OBSIDIAN_VAULT = process.env.OBSIDIAN_VAULT;
+function syncMirrors() {
+  scheduleMdWrite(CAMPAIGN_ID!, state.codex);
+  if (OBSIDIAN_VAULT) scheduleVaultWrite(OBSIDIAN_VAULT, CAMPAIGN_ID!, state.codex);
+}
 
 const WORKER_WS = process.env.WORKER_WS ?? "ws://127.0.0.1:8787";
 const CAMPAIGN_ID = process.env.CAMPAIGN_ID;
@@ -54,7 +61,8 @@ function connect() {
   ws = new WebSocket(`${WORKER_WS}/ws/${CAMPAIGN_ID}`);
 
   ws.on("open", () => {
-    console.log(`[agent] connected as ai-dm; .md mirror -> ${mdPathFor(CAMPAIGN_ID!)}`);
+    const vaultRoot = vaultRootFor(CAMPAIGN_ID!);
+    console.log(`[agent] connected as ai-dm; .md mirror -> ${mdPathFor(CAMPAIGN_ID!)}${vaultRoot ? `; obsidian vault -> ${vaultRoot}` : ""}`);
     backoffMs = 500;
     send({ type: "hello", campaignId: CAMPAIGN_ID!, displayName: "AI-DM", role: "agent", token: SHARED_SECRET });
   });
@@ -84,7 +92,7 @@ async function handleMessage(raw: Buffer) {
         id: m.id, author: m.authorName, text: m.text, channel: m.channel, role: m.authorRole, createdAt: m.createdAt,
       }));
       state.recentChat = state.fullChat.slice(-40);
-      scheduleMdWrite(CAMPAIGN_ID!, state.codex);
+      syncMirrors();
       break;
     case "ai.paused":
       state.aiPaused = msg.paused;
@@ -93,12 +101,12 @@ async function handleMessage(raw: Buffer) {
     case "codex.upsert": {
       const i = state.codex.findIndex((e) => e.id === msg.entry.id);
       if (i >= 0) state.codex[i] = msg.entry; else state.codex.push(msg.entry);
-      scheduleMdWrite(CAMPAIGN_ID!, state.codex);
+      syncMirrors();
       break;
     }
     case "codex.delete":
       state.codex = state.codex.filter((e) => e.id !== msg.id);
-      scheduleMdWrite(CAMPAIGN_ID!, state.codex);
+      syncMirrors();
       break;
     case "combat.update": state.combat = msg.state; break;
     case "mode.set": state.mode = msg.mode; break;
